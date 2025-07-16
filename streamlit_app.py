@@ -4,64 +4,80 @@ import pandas as pd
 import requests
 from io import BytesIO
 
-st.set_page_config(page_title="Albion Online - Precios del Marketplace")
-
+st.set_page_config(page_title="Albion Online - Precios del Marketplace", layout="wide")
 st.title("📊 Precios del Marketplace - Albion Online")
-st.markdown("Genera precios actualizados de ítems por ciudad y analiza ganancias.")
+st.markdown("Consulta precios **actualizados** de monturas, herramientas y recursos procesados por ciudad. Descarga el Excel con nombres reales y analiza las mejores ganancias.")
 
-# Ciudades e ítems a consultar
 cities = ["Bridgewatch", "Martlock", "Thetford", "Fort Sterling", "Lymhurst", "Caerleon"]
-items = [
-    "T4_BAG", "T5_BAG", "T6_BAG",
-    "T4_CAPE", "T5_CAPE", "T6_CAPE",
-    "T4_MAIN_SWORD", "T5_MAIN_SWORD", "T6_MAIN_SWORD",
-    "T4_ARMOR_PLATE_SET1", "T5_ARMOR_PLATE_SET1", "T6_ARMOR_PLATE_SET1",
-    "T4_SHOES_PLATE_SET1", "T5_SHOES_PLATE_SET1", "T6_SHOES_PLATE_SET1"
-]
 
-# Botón para generar precios
+@st.cache_data(ttl=3600)
+def cargar_nombres_items():
+    url = "https://raw.githubusercontent.com/broderickhyman/ao-bin-dumps/master/formatted/items.json"
+    response = requests.get(url)
+    data = response.json()
+    nombres = {}
+    for item in data:
+        index = item.get("Index")
+        nombre_es = item.get("LocalizedNames", {}).get("ES-ES") or item.get("LocalizedNames", {}).get("EN-US")
+        if index and nombre_es:
+            if index.startswith("T") and "_" in index:
+                tier = index[1]
+                nombre_completo = f"{nombre_es} T{tier}"
+            else:
+                nombre_completo = nombre_es
+            nombres[index] = nombre_completo
+    return nombres
+
+def obtener_items_filtrados():
+    nombres = cargar_nombres_items()
+    categorias = ["MOUNT_", "TOOL_", "ORE_", "WOOD_", "FIBER_", "HIDE_", "STONE_", "BAR_", "PLANK_", "CLOTH_", "LEATHER_", "BLOCK_"]
+    filtrados = [k for k in nombres if any(cat in k for cat in categorias) and k.startswith("T")]
+    return filtrados, nombres
+
 if st.button("🔄 Generar precios actualizados"):
+    st.info("Obteniendo precios y procesando información...")
+    items_filtrados, nombres_dic = obtener_items_filtrados()
     base_url = "https://www.albion-online-data.com/api/v2/stats/prices/"
-    results = []
+    resultados = []
 
-    with st.spinner("Consultando la API de Albion..."):
-        for item_id in items:
-            url = f"{base_url}{item_id}?locations={','.join(cities)}"
-            try:
-                res = requests.get(url)
-                if res.status_code == 200:
-                    for entry in res.json():
-                        sell = entry.get("sell_price_min", 0)
-                        buy = entry.get("buy_price_max", 0)
-                        if sell > 0 and buy > 0:
-                            results.append({
-                                "Ciudad": entry["city"],
-                                "Item": item_id,
-                                "Precio Venta (jugadores)": sell,
-                                "Precio Compra (jugadores)": buy,
-                                "Ganancia Potencial": sell - buy
-                            })
-            except Exception as e:
-                st.warning(f"Error con {item_id}: {e}")
+    for i in range(0, len(items_filtrados), 50):
+        grupo = items_filtrados[i:i+50]
+        url = f"{base_url}{','.join(grupo)}?locations={','.join(cities)}"
+        try:
+            res = requests.get(url)
+            if res.status_code == 200:
+                for entry in res.json():
+                    sell = entry.get("sell_price_min", 0)
+                    buy = entry.get("buy_price_max", 0)
+                    if sell > 0 and buy > 0:
+                        item_id = entry["item_id"]
+                        nombre_visible = nombres_dic.get(item_id, item_id)
+                        resultados.append({
+                            "Ciudad": entry["city"],
+                            "Ítem": nombre_visible,
+                            "Precio Venta (jugadores)": sell,
+                            "Precio Compra (jugadores)": buy,
+                            "Ganancia Potencial": sell - buy
+                        })
+        except Exception as e:
+            st.warning(f"Error consultando ítems: {e}")
 
-    if results:
-        df = pd.DataFrame(results)
-        st.success("✅ Precios generados correctamente")
-        st.dataframe(df.sort_values("Ganancia Potencial", ascending=False))
+    if resultados:
+        df = pd.DataFrame(resultados)
+        st.success("✅ Datos cargados correctamente.")
+        st.dataframe(df.sort_values("Ganancia Potencial", ascending=False), use_container_width=True)
 
-        # Filtro por ciudad
-        ciudad_filtrada = st.selectbox("Filtrar por ciudad", ["Todas"] + cities)
-        if ciudad_filtrada != "Todas":
-            df = df[df["Ciudad"] == ciudad_filtrada]
+        st.markdown("### 🏆 Top Ganancias por Ciudad")
+        resumen = df.sort_values("Ganancia Potencial", ascending=False).groupby("Ciudad").first().reset_index()
+        st.dataframe(resumen[["Ciudad", "Ítem", "Ganancia Potencial"]], use_container_width=True)
 
-        # Descargar Excel
         output = BytesIO()
         df.to_excel(output, index=False)
         st.download_button(
             label="📥 Descargar Excel",
             data=output.getvalue(),
-            file_name="precios_albion.xlsx",
+            file_name="precios_albion_actualizados.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
     else:
-        st.error("No se encontraron datos para mostrar.")
+        st.warning("No se encontraron ítems con precios de compra y venta simultáneos.")
